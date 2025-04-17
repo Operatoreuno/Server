@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": "./",
+    "paths": {
+      "@features/*": ["src/features/*"],
+      "@exceptions/*": ["src/core/errors/exceptions/*"],
+      "@errors/*": ["src/core/errors/*"],
+      "@config/*": ["src/config/*"],
+      "@utils/*": ["src/core/utils/*"],
+      "@security/*": ["src/core/security/*"],
+      "@app": ["src/app"],
+      "@core/*": ["src/core/*"]
+    },
+    "typeRoots": [
+      "@types",
+      "./node_modules/@types",
+      "src/core/types"
+    ]
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}
