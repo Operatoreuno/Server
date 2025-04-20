@@ -1,11 +1,12 @@
 import { prismaClient } from "@app";
 import { hashSync } from "bcrypt";
-import { SignUpSchema } from "@utils/schemas";
+import { SignUpSchema } from "@core/utils/schemas";
 import { BadRequestException } from "src/core/errors/exceptions/4xx";
 import { ErrorCode } from "src/core/errors/error.codes";
 import { sendEmail } from "@config/sender";
 import { welcomeTemplate } from "../emails/welcome";
 import { FRONTEND_URL } from "@config/env";
+import { signupLogger } from "@logger";
 
 /**
  * Servizio per la gestione della registrazione utenti standard.
@@ -45,65 +46,74 @@ export class UserService {
      * @throws BadRequestException per errori di validazione, utente esistente o problemi email
      */
     static async signup(email: string, password: string, name: string, surname: string) {
-        // Validazione completa dei dati con Zod schema
-        SignUpSchema.safeParse({ email, password, name, surname });
+        try {
+            // Validazione completa dei dati con Zod schema
+            // Usando parse invece di safeParse per ottenere i dati sanitizzati
+            const validatedData = SignUpSchema.parse({ email, password, name, surname });
+            
+            // Utilizziamo i dati sanitizzati da Zod
+            const { email: sanitizedEmail, password: sanitizedPassword, 
+                    name: sanitizedName, surname: sanitizedSurname } = validatedData;
 
-        // Verifica campi obbligatori
-        if (!email || !name || !surname || !password) {
-            throw new BadRequestException("Tutti i campi sono obbligatori", ErrorCode.INVALID_REQUEST);
-        }
+            signupLogger.info(`Tentativo registrazione per email: ${sanitizedEmail}`);
 
-        // Uso di una transazione per garantire atomicità dell'operazione
-        // Se una qualsiasi operazione fallisce, l'intera transazione viene annullata
-        return await prismaClient.$transaction(async (tx) => {
-            // Verifica esistenza utente con lock per prevenire race condition
-            const existingUser = await tx.user.findUnique({
-                where: { email },
-                select: { id: true }
+            // Verifica esistenza utente con la stessa email
+            const existingUser = await prismaClient.user.findUnique({
+                where: { email: sanitizedEmail }
             });
 
-            // Gestione utente duplicato
             if (existingUser) {
-                throw new BadRequestException("Utente già esistente", ErrorCode.ALREADY_EXISTS);
+                signupLogger.warn(`Email già in uso durante registrazione: ${sanitizedEmail}`);
+                throw new BadRequestException("Email già in uso", ErrorCode.ALREADY_EXISTS);
             }
 
-            // Creazione dell'utente con hashing sicuro della password
-            // e selezione precisa dei campi da restituire (no dati sensibili)
-            const user = await tx.user.create({
+            // Hash password con bcrypt (costo 12)
+            const hashedPassword = hashSync(sanitizedPassword, 12);
+
+            // Creazione nuovo utente con transazione
+            const newUser = await prismaClient.user.create({
                 data: {
-                    email,
-                    password: hashSync(password, 12), // Costo 12 per equilibrio sicurezza/performance
-                    name,
-                    surname
+                    email: sanitizedEmail,
+                    password: hashedPassword,
+                    name: sanitizedName,
+                    surname: sanitizedSurname,
+                    isActive: true,
                 },
                 select: {
                     id: true,
                     email: true,
                     name: true,
                     surname: true,
-                    role: true,
-                    createdAt: true
+                    isActive: true,
+                    createdAt: true,
+                    role: true
                 }
             });
 
+            signupLogger.info(`Utente registrato con successo: ID ${newUser.id}, email: ${sanitizedEmail}`);
+
             // Invio email di benvenuto
             try {
-                const welcomeUrl = `${FRONTEND_URL}/login`;
-                const emailTemplate = welcomeTemplate(user.name, welcomeUrl);
-                await sendEmail(user.email, emailTemplate);
-                
-                return {
-                    success: true,
-                    user
-                };
-
-            } catch (emailError) {
-                // Gestione specifica errore invio email
-                throw new BadRequestException(
-                    "Impossibile inviare l'email di benvenuto.",
-                    ErrorCode.EMAIL_SENDING_FAILED
-                );
+                const emailTemplate = welcomeTemplate(sanitizedName, FRONTEND_URL);
+                await sendEmail(sanitizedEmail, emailTemplate);
+                signupLogger.info(`Email di benvenuto inviata a utente ${newUser.id}`);
+            } catch (error) {
+                signupLogger.error(`Errore invio email di benvenuto per utente ${newUser.id}`, error);
+                // Non blocchiamo il flusso per problemi con l'email
             }
-        });
+
+            return {
+                ...newUser,
+                success: true
+            };
+        } catch (error) {
+            if (error instanceof BadRequestException) {
+                // Rilancio l'errore se è già gestito
+                throw error;
+            }
+            
+            signupLogger.error("Errore durante la registrazione", error);
+            throw new BadRequestException("Errore durante la registrazione", ErrorCode.INTERNAL_SERVER_ERROR);
+        }
     }
 }

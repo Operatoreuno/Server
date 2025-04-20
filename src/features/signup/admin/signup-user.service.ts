@@ -1,13 +1,14 @@
 import { prismaClient } from "@app";
 import { ErrorCode } from "@errors/error.codes";
 import { BadRequestException } from "@exceptions/4xx";
-import { SignUpSchema } from "@utils/schemas";
+import { SignUpSchema } from "@core/utils/schemas";
 import { UserRole } from "@prisma/client";
 import crypto from "crypto";
 import { hashSync } from "bcrypt";
 import { sendEmail } from "@config/sender";
 import { FRONTEND_URL } from "@config/env";
 import { newUserTemplate } from "../emails/new-user";
+import { signupLogger } from "@logger";
 
 /**
  * Servizio per la gestione della creazione utenti da parte di amministratori.
@@ -50,65 +51,83 @@ export class AdminService {
      * @throws BadRequestException per errori di validazione, utente esistente o problemi email
      */
     static async signup(email: string, name: string, surname: string, role: UserRole = UserRole.STUDENT) {
-        // Validazione completa dei dati con Zod schema
-        SignUpSchema.safeParse({ email, name, surname });
+        try {
+            // Validazione completa dei dati con Zod schema
+            SignUpSchema.safeParse({ email, name, surname });
 
-        // Verifica campi obbligatori
-        if (!email || !name || !surname) {
-            throw new BadRequestException("Tutti i campi sono obbligatori", ErrorCode.INVALID_REQUEST);
-        }
-
-        // Uso di una transazione per garantire atomicità dell'operazione
-        // Se una qualsiasi operazione fallisce, l'intera transazione viene annullata
-        return await prismaClient.$transaction(async (tx) => {
-            // Verifica esistenza utente con lock per prevenire race condition
-            const existingUser = await tx.user.findUnique({
-                where: { email },
-                select: { id: true }
-            });
-
-            // Gestione utente duplicato
-            if (existingUser) {
-                throw new BadRequestException("Utente già esistente", ErrorCode.ALREADY_EXISTS);
+            // Verifica campi obbligatori
+            if (!email || !name || !surname) {
+                signupLogger.warn(`Tentativo creazione utente con campi mancanti: email=${email}`);
+                throw new BadRequestException("Tutti i campi sono obbligatori", ErrorCode.INVALID_REQUEST);
             }
 
-            // Generazione token crittograficamente sicuro (64 byte = 128 caratteri hex)
-            const resetToken = crypto.randomBytes(64).toString('hex');
-            const resetTokenExpiry = new Date(Date.now() + 3600000); // 1 ora di validità
-            
-            // Password temporanea casuale con hash sicuro
-            const password = hashSync(crypto.randomBytes(10).toString('hex'), 12);
+            signupLogger.info(`Admin: tentativo creazione utente con email: ${email}, ruolo: ${role}`);
 
-            // Creazione dell'utente con token di reset e password temporanea
-            const user = await tx.user.create({
-                data: {
-                    email,
-                    name,
-                    surname,
-                    role,
-                    password,
-                    resetToken,
-                    resetTokenExpiry
+            // Uso di una transazione per garantire atomicità dell'operazione
+            // Se una qualsiasi operazione fallisce, l'intera transazione viene annullata
+            return await prismaClient.$transaction(async (tx) => {
+                // Verifica esistenza utente con lock per prevenire race condition
+                const existingUser = await tx.user.findUnique({
+                    where: { email },
+                    select: { id: true }
+                });
+
+                // Gestione utente duplicato
+                if (existingUser) {
+                    signupLogger.warn(`Admin: tentativo creazione utente con email già esistente: ${email}`);
+                    throw new BadRequestException("Utente già esistente", ErrorCode.ALREADY_EXISTS);
+                }
+
+                // Generazione token crittograficamente sicuro (64 byte = 128 caratteri hex)
+                const resetToken = crypto.randomBytes(64).toString('hex');
+                const resetTokenExpiry = new Date(Date.now() + 3600000); // 1 ora di validità
+                
+                // Password temporanea casuale con hash sicuro
+                const password = hashSync(crypto.randomBytes(10).toString('hex'), 12);
+
+                // Creazione dell'utente con token di reset e password temporanea
+                const user = await tx.user.create({
+                    data: {
+                        email,
+                        name,
+                        surname,
+                        role,
+                        password,
+                        resetToken,
+                        resetTokenExpiry
+                    }
+                });
+
+                signupLogger.info(`Admin: utente creato con successo: ID ${user.id}, email: ${email}, ruolo: ${role}`);
+
+                // Invio email con link di primo accesso
+                try {
+                    const welcomeUrl = `${FRONTEND_URL}/set-password?token=${resetToken}`;
+                    const emailTemplate = newUserTemplate(user.name, welcomeUrl);
+                    await sendEmail(user.email, emailTemplate);
+                    
+                    signupLogger.info(`Admin: email di benvenuto inviata a utente ${user.id}`);
+                    return {
+                        success: true,
+                        user
+                    };
+                } catch (emailError) {
+                    // Gestione specifica errore invio email
+                    signupLogger.error(`Admin: errore nell'invio email di benvenuto per utente ${user.id}`, emailError);
+                    throw new BadRequestException(
+                        "Impossibile inviare l'email di benvenuto. Riprova più tardi.",
+                        ErrorCode.EMAIL_SENDING_FAILED
+                    );
                 }
             });
-
-            // Invio email con link di primo accesso
-            try {
-                const welcomeUrl = `${FRONTEND_URL}/welcome?token=${resetToken}`;
-                const emailTemplate = newUserTemplate(user.name, welcomeUrl);
-                await sendEmail(user.email, emailTemplate);
-                
-                return {
-                    success: true,
-                    user
-                };
-            } catch (emailError) {
-                // Gestione specifica errore invio email
-                throw new BadRequestException(
-                    "Impossibile inviare l'email di benvenuto. Riprova più tardi.",
-                    ErrorCode.EMAIL_SENDING_FAILED
-                );
+        } catch (error) {
+            if (error instanceof BadRequestException) {
+                // Rilancio l'errore se è già gestito
+                throw error;
             }
-        });
+            
+            signupLogger.error("Errore durante la creazione utente da admin", error);
+            throw new BadRequestException("Errore durante la creazione utente", ErrorCode.INTERNAL_SERVER_ERROR);
+        }
     }
 }

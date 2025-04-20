@@ -1,7 +1,7 @@
 import rateLimit from "express-rate-limit";
 
 /**
- * Modulo per la protezione contro attacchi bruteforce e DoS.
+ * Modulo per la protezione contro attacchi di forza bruta e DoS.
  * 
  * Implementa limiti di frequenza per endpoint sensibili come:
  * - Login (3 tentativi ogni 30 minuti)
@@ -58,4 +58,3 @@ export const forgotPasswordLimiter = Limiter(
     2,                             // 2 tentativi
     "Troppi tentativi. Attendere 15 minuti."
 );
-

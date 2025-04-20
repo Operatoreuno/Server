@@ -1,5 +1,5 @@
 import { prismaClient } from "@app";
-import { AuthConfig } from "../types";
+import { AuthConfig } from "../utils/types";
 import { ADMIN_JWT_SECRET, ADMIN_REFRESH_TOKEN_SECRET } from "@config/env";
 
 /**

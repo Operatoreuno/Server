@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { prismaClient } from "@app";
 import { Prisma } from "@prisma/client";
-import { SignUpSchema } from "@utils/schemas";
+import { SignUpSchema } from "@core/utils/schemas";
 import { BadRequestException, NotFoundException } from "@errors/exceptions/4xx";
 import { ErrorCode } from "@errors/error.codes";
 

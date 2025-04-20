@@ -1,12 +1,13 @@
 import { prismaClient } from "@app";
 import { ErrorCode } from "@errors/error.codes";
 import { BadRequestException, ForbiddenException, UnauthorizedException } from "@errors/exceptions/4xx";
-import { EmailSchema, PasswordSchema } from "@utils/schemas";
+import { EmailSchema, PasswordSchema } from "@core/utils/schemas";
 import crypto from "crypto";
 import { compare, hashSync } from "bcrypt";
 import { sendEmail } from "@config/sender";
 import { resetPasswordTemplate } from "./emails/reset-password";
 import { FRONTEND_URL } from "@config/env";
+import { passwordLogger } from "@logger";
 
 /**
  * Servizio per la gestione delle operazioni relative alle password.
@@ -40,6 +41,7 @@ export class PasswordService {
         // Validazione formato email con Zod schema
         const emailValidation = EmailSchema.safeParse({ email });
         if (!emailValidation.success) {
+            passwordLogger.warn(`Tentativo di reset password con email in formato non valido: ${email}`);
             throw new BadRequestException(
                 "Formato email non valido", 
                 ErrorCode.INVALID_EMAIL, 
@@ -62,6 +64,7 @@ export class PasswordService {
         // Importante: per prevenire enumeration attack, rispondiamo sempre con successo
         // anche se l'utente non esiste nel database
         if (!user) {
+            passwordLogger.info(`Richiesta reset password per email non registrata: ${email}`);
             return { success: true, message: "Se l'account esiste, riceverai un'email con le istruzioni" };
         }
 
@@ -70,6 +73,7 @@ export class PasswordService {
         if (recentRequest) {
             // Evitiamo di inviare troppe email, ma rispondiamo ugualmente con successo
             // Questo previene potenziali attacchi DoS tramite richieste multiple
+            passwordLogger.info(`Richiesta reset password troppo frequente per utente ${user.id}`);
             return { success: true, message: "Se l'account esiste, riceverai un'email con le istruzioni" };
         }
 
@@ -86,18 +90,21 @@ export class PasswordService {
             }
         });
 
-        // Invio email
         try {
-            const resetPasswordUrl = `${FRONTEND_URL}/reset-password?token=${resetToken}`;
-            const emailTemplate = resetPasswordTemplate(user.name, resetPasswordUrl);
+            // URL di reset completo per il frontend
+            const resetUrl = `${FRONTEND_URL}/set-password?token=${resetToken}`;
+            
+            // Preparazione del template e dei dati
+            const emailTemplate = resetPasswordTemplate(user.name, resetUrl);
+            
+            // Invio email con token
             await sendEmail(user.email, emailTemplate);
-            return {
-                success: true,
-                message: "Se l'account esiste, riceverai un'email con le istruzioni"
-            };
-        } catch (emailError) {
-            // In caso di errore nell'invio dell'email, annulliamo il token
-            // per evitare stati inconsistenti e problemi di sicurezza
+            
+            passwordLogger.info(`Email di reset password inviata all'utente ${user.id}`);
+            return { success: true, message: "Se l'account esiste, riceverai un'email con le istruzioni" };
+        } catch (error) {
+            passwordLogger.error(`Errore nell'invio email di reset per utente ${user.id}`, error);
+            // Annulliamo il token in caso di errore nell'invio
             await prismaClient.user.update({
                 where: { id: user.id },
                 data: {
@@ -105,15 +112,13 @@ export class PasswordService {
                     resetTokenExpiry: null
                 }
             });
-
-            // Lanciamo un'eccezione specifica per problemi di invio email
+            
             throw new BadRequestException(
-                "Impossibile inviare l'email di reset. Riprova più tardi.",
+                "Errore nell'invio dell'email di reset", 
                 ErrorCode.EMAIL_SENDING_FAILED
             );
         }
     }
-
 
     /**
      * Completa il flusso di reset password verificando il token e impostando la nuova password.
@@ -134,12 +139,14 @@ export class PasswordService {
     static async setPassword(token: string, newPassword: string) {
         // Verifica presenza token
         if (!token) {
+            passwordLogger.warn("Tentativo di reset password senza token");
             throw new BadRequestException("Token obbligatorio", ErrorCode.INVALID_TOKEN);
         }
 
         // Validazione requisiti sicurezza password
         const passwordValidation = PasswordSchema.safeParse(newPassword);
         if (!passwordValidation.success) {
+            passwordLogger.warn("Tentativo di reset password con password non conforme");
             throw new BadRequestException(
                 "La password non rispetta i requisiti di sicurezza", 
                 ErrorCode.INVALID_PASSWORD, 
@@ -163,6 +170,7 @@ export class PasswordService {
 
             // Gestione token non valido o scaduto
             if (!user) {
+                passwordLogger.warn(`Tentativo di reset password con token non valido o scaduto: ${token.substring(0, 10)}...`);
                 throw new BadRequestException("Token non valido o scaduto", ErrorCode.INVALID_TOKEN);
             }
 
@@ -182,7 +190,7 @@ export class PasswordService {
 
             // Misura di sicurezza: revochiamo tutte le sessioni attive dell'utente
             // Questo forza il logout su tutti i dispositivi dopo il reset della password
-            await tx.userRefreshToken.updateMany({
+            const revokedSessions = await tx.userRefreshToken.updateMany({
                 where: {
                     userId: user.id,
                     revoked: false
@@ -190,6 +198,7 @@ export class PasswordService {
                 data: { revoked: true }
             });
             
+            passwordLogger.info(`Password reimpostata per utente ${user.id}, revocate ${revokedSessions.count} sessioni`);
             return { success: true, message: "Password impostata con successo" };
         });
     }
@@ -213,20 +222,23 @@ export class PasswordService {
      * @returns Oggetto con stato operazione e messaggio di conferma
      * @throws BadRequestException | UnauthorizedException | ForbiddenException 
      */
-    static async updatePassword(req: Express.Request, oldPassword: string, newPassword: string) {
+    static async changePassword(req: Express.Request, oldPassword: string, newPassword: string) {
         // Verifica che l'utente sia autenticato
         if (!req.user?.id) {
+            passwordLogger.warn("Tentativo di cambio password senza autenticazione");
             throw new ForbiddenException("Accesso negato: utente non autenticato", ErrorCode.FORBIDDEN);
         }
 
         // Controllo presenza parametri obbligatori
         if (!oldPassword || !newPassword) {
+            passwordLogger.warn(`Cambio password con parametri mancanti per utente ${req.user.id}`);
             throw new BadRequestException("Vecchia e nuova password obbligatorie", ErrorCode.INVALID_REQUEST);
         }
 
         // Validazione requisiti sicurezza della nuova password
         const passwordValidation = PasswordSchema.safeParse(newPassword);
         if (!passwordValidation.success) {
+            passwordLogger.warn(`Cambio password con password non conforme per utente ${req.user.id}`);
             throw new BadRequestException(
                 "La nuova password non rispetta i requisiti di sicurezza", 
                 ErrorCode.INVALID_PASSWORD, 
@@ -245,6 +257,7 @@ export class PasswordService {
 
             // Verifica esistenza utente nel database
             if (!user) {
+                passwordLogger.error(`Utente ${userId} non trovato nel database durante cambio password`);
                 throw new BadRequestException("Utente non trovato", ErrorCode.NOT_FOUND);
             }
 
@@ -252,6 +265,7 @@ export class PasswordService {
             // che è resistente a timing attack durante il confronto
             const isPasswordValid = await compare(oldPassword, user.password);
             if (!isPasswordValid) {
+                passwordLogger.warn(`Tentativo cambio password con vecchia password errata per utente ${userId}`);
                 throw new UnauthorizedException("Vecchia password non valida", ErrorCode.UNAUTHORIZED);
             }
 
@@ -266,7 +280,7 @@ export class PasswordService {
 
             // Misura di sicurezza: revochiamo tutte le sessioni attive dell'utente
             // Questo forza il logout su tutti i dispositivi dopo il cambio password
-            await tx.userRefreshToken.updateMany({
+            const revokedSessions = await tx.userRefreshToken.updateMany({
                 where: { 
                     userId: userId,
                     revoked: false
@@ -274,6 +288,7 @@ export class PasswordService {
                 data: { revoked: true }
             });
 
+            passwordLogger.info(`Password aggiornata per utente ${userId}, revocate ${revokedSessions.count} sessioni`);
             return {
                 success: true,
                 message: "Password aggiornata con successo. Effettua nuovamente il login.",

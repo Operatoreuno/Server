@@ -2,7 +2,7 @@ import { Router } from "express";
 import { errorHandler } from "@errors/error.handler";
 import { signup } from "./user/signup.controller";
 import { signupUser } from "./admin/signup-user.controller";
-import { adminAuth } from "@features/auth/middleware/auth";
+import { adminAuth } from "@features/auth/utils/auth";
 
 /**
  * Router per le funzionalità di registrazione utenti.
@@ -16,10 +16,12 @@ import { adminAuth } from "@features/auth/middleware/auth";
  */
 const rootRouter:Router = Router();
 
-// Routes User Web
+// Registrazione standard per utenti finali
+// Non richiede autenticazione
 rootRouter.use('/signup', errorHandler(signup));
 
-// Routes Admin Web
+// Registrazione utente da parte di admin
+// Protetto da middleware di autenticazione admin
 rootRouter.use('/admin/signup-user', adminAuth, errorHandler(signupUser));
 
 export default { rootRouter };

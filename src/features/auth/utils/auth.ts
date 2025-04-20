@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { NextFunction, Request, Response } from "express";
-import { AuthConfig, TokenPayload } from "@features/auth/types";
+import { AuthConfig, TokenPayload } from "@features/auth/utils/types";
 import { adminAuthConfig } from "@features/auth/admin/admin.config";
 import { userAuthConfig } from "@features/auth/user/user.config";
 import { ErrorCode } from "@errors/error.codes";
@@ -59,7 +59,7 @@ const extractToken = (req: Request): string | null => {
  * @returns Payload con ID utente autenticato
  * @throws UnauthorizedException se il refresh token è invalido o scaduto
  */
-const handleTokenRefresh = async (req: Request, res: Response, config: AuthConfig): Promise<TokenPayload> => {
+export const handleTokenRefresh = async (req: Request, res: Response, config: AuthConfig): Promise<TokenPayload> => {
   // Estrazione refresh token dai cookie
   const refreshToken = req.cookies.refreshToken;
   if (!refreshToken) throw new UnauthorizedException("Missing refresh token", ErrorCode.UNAUTHORIZED);
@@ -117,14 +117,20 @@ const handleTokenRefresh = async (req: Request, res: Response, config: AuthConfi
  * 
  * @description Crea un middleware personalizzato in base alla configurazione:
  * 1. Estrae e verifica il token di accesso
- * 2. Gestisce il refresh automatico dei token scaduti
+ * 2. Segnala quando un token è scaduto (richiedendo l'uso dell'endpoint di refresh)
  * 3. Recupera e aggiunge l'entità autenticata alla request
  * 
  * Implementa le seguenti misure di sicurezza:
  * - Verifica firma e validità JWT
- * - Gestione automatica token scaduti
+ * - Error code specifico per token scaduti vs. token invalidi
  * - Verifica esistenza entità nel database
  * - Arricchimento sicuro della request con dati autenticati
+ * 
+ * Caratteristiche del sistema di token:
+ * - Token di accesso a breve durata (15 minuti)
+ * - Rinnovo esplicito tramite endpoint /refresh dedicato
+ * - Pattern "one-time use" per i refresh token
+ * - Tracciamento sessioni nel database con possibilità di revoca
  * 
  * @param config - Configurazione specifica per il tipo di entità (user/admin)
  * @returns Middleware Express per l'autenticazione
@@ -140,12 +146,14 @@ export const createAuthMiddleware = (config: AuthConfig) => {
       try {
         // Verifica validità del token JWT
         payload = jwt.verify(token, config.jwtSecret) as TokenPayload;
+        
+        // Rimuoviamo il rinnovo automatico ad ogni chiamata
+        // payload = await handleTokenRefresh(req, res, config);
       } catch (error) {
         // Gestione specifica per token scaduti vs. token invalidi
         if (error instanceof jwt.TokenExpiredError) {
-          // Se il token è scaduto ma abbiamo un refresh token, 
-          // proviamo a rinnovare automaticamente
-          payload = await handleTokenRefresh(req, res, config);
+          // Non rinnoviamo automaticamente, restituiamo un errore che indica di usare l'endpoint di refresh
+          throw new UnauthorizedException("Token scaduto, utilizzare l'endpoint di refresh", ErrorCode.TOKEN_EXPIRED);
         } else {
           // Altre tipologie di errore indicano un token non valido
           throw new UnauthorizedException("Invalid access token", ErrorCode.UNAUTHORIZED);

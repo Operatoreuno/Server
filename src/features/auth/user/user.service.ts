@@ -3,9 +3,10 @@ import crypto from 'crypto';
 import { prismaClient } from "@app";
 import { compare, hashSync } from "bcrypt";
 import { USER_JWT_SECRET, USER_REFRESH_TOKEN_SECRET } from "@config/env";
-import { LoginSchema, PasswordSchema, EmailSchema } from "@utils/schemas";
-import { BadRequestException, ForbiddenException, NotFoundException } from "src/core/errors/exceptions/4xx";
+import { LoginSchema, PasswordSchema, EmailSchema } from "@core/utils/schemas";
+import { BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException } from "src/core/errors/exceptions/4xx";
 import { ErrorCode } from "src/core/errors/error.codes";
+import { authLogger } from "@logger";
 
 /**
  * Servizio per la gestione dell'autenticazione utenti.
@@ -49,158 +50,166 @@ export class UserService {
      * @throws BadRequestException per credenziali errate o problemi di validazione
      */
     static async login(email: string, password: string) {
-        // Validazione input con schema Zod
-        LoginSchema.safeParse({ email, password });
-
-        // Cerchiamo l'utente selezionando solo i campi necessari
-        // per il processo di autenticazione
-        const user = await prismaClient.user.findFirst({
-            where: { email },
+        // Validazione input con schema Zod e sanitizzazione
+        const validatedData = LoginSchema.parse({ email, password });
+        
+        const { email: sanitizedEmail, password: sanitizedPassword } = validatedData;
+        
+        // Ricerca utente con filtro stato attivo
+        const user = await prismaClient.user.findUnique({
+            where: { 
+                email: sanitizedEmail,
+            },
             select: {
                 id: true,
                 email: true,
                 password: true,
-                role: true,
+                name: true,
+                surname: true,
+                isActive: true,
+                role: true
             }
         });
-
-        // Verifica credenziali con protezione timing attack
-        // Il ritardo costante previene attacchi basati sul tempo di risposta
-        if (!user || !compare(password, user.password || '')) {
-            // Utilizzo di un ritardo costante per prevenire timing attacks
-            await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Verifica esistenza utente e correttezza password
+        if (!user || !(await compare(sanitizedPassword, user.password))) {
+            // Protezione contro timing attacks
+            await new Promise(resolve => setTimeout(resolve, 200)); 
+            authLogger.info(`Tentativo di login fallito per l'email: ${sanitizedEmail}`);
             throw new BadRequestException("Email o password errati", ErrorCode.INVALID_REQUEST);
         }
-
-        // Numero massimo di sessioni attive per utente
+        
+        // Verifica che l'utente sia attivo
+        if (!user.isActive) {
+            authLogger.warn(`Tentativo di login per account non attivato: ${user.id}`);
+            throw new ForbiddenException("Account non attivato", ErrorCode.FORBIDDEN);
+        }
+        
+        // Preparazione dei token e della sessione
         const MAX_ACTIVE_SESSIONS = 3;
-
-        // Utilizziamo una transazione per garantire atomicità dell'operazione
-        // Se una qualsiasi operazione fallisce, l'intera transazione viene annullata
-        const sessionData = await prismaClient.$transaction(async (tx) => {
-            // Conteggio delle sessioni attive dell'utente
+        const sessionId = crypto.randomUUID();
+        
+        const accessToken = jwt.sign(
+            { id: user.id, email: user.email, role: user.role }, 
+            USER_JWT_SECRET, 
+            { expiresIn: '15m' }
+        );
+        
+        const refreshToken = jwt.sign(
+            { id: user.id, sessionId }, 
+            USER_REFRESH_TOKEN_SECRET, 
+            { expiresIn: '30d' }
+        );
+        
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 30); // 30 giorni
+        
+        // Uso transazione per garantire l'atomicità dell'operazione
+        const result = await prismaClient.$transaction(async (tx) => {
+            // Aggiorna lastLogin
+            await tx.user.update({
+                where: { id: user.id },
+                data: { lastLogin: new Date() }
+            });
+            
+            // Conta sessioni attive per limitarle
             const activeSessions = await tx.userRefreshToken.count({
                 where: {
                     userId: user.id,
-                    revoked: false,
-                    expiresAt: { gt: new Date() }
+                    revoked: false
                 }
             });
-
-            // Se l'utente ha raggiunto il limite di sessioni
-            // revochiamo la sessione più vecchia (FIFO)
+            
+            // Se troppe sessioni attive, revoca la più vecchia
             if (activeSessions >= MAX_ACTIVE_SESSIONS) {
-                // Troviamo la sessione più vecchia dell'utente
-                const oldestSessions = await tx.userRefreshToken.findMany({
+                const oldestSession = await tx.userRefreshToken.findFirst({
                     where: {
                         userId: user.id,
                         revoked: false
                     },
-                    orderBy: { createdAt: 'asc' }, // Ordiniamo per data di creazione crescente
-                    take: 1                       // Prendiamo solo la più vecchia
+                    orderBy: {
+                        createdAt: 'asc'
+                    }
                 });
-
-                // Se abbiamo trovato una sessione, la revochiamo
-                if (oldestSessions.length > 0) {
+                
+                if (oldestSession) {
                     await tx.userRefreshToken.update({
-                        where: { id: oldestSessions[0].id },
+                        where: { id: oldestSession.id },
                         data: { revoked: true }
                     });
+                    
+                    authLogger.info(`Sessione più vecchia revocata per utente ${user.id} (${oldestSession.sessionId})`);
                 }
             }
-
-            // Creazione payload per access token con informazioni minime necessarie
-            const tokenPayload = {
-                id: user.id,
-                role: user.role,
-                email: user.email,
-                iat: Math.floor(Date.now() / 1000) // Timestamp di emissione
-            };
-
-            // Generazione access token (breve durata - 15 minuti)
-            const accessToken = jwt.sign(tokenPayload, USER_JWT_SECRET!, { expiresIn: '15m' });
             
-            // Generazione refresh token (lunga durata - 30 giorni)
-            // con payload minimale (solo ID utente)
-            const refreshToken = jwt.sign({ id: user.id }, USER_REFRESH_TOKEN_SECRET!, { expiresIn: '30d' });
-            
-            // Generazione ID sessione unico con UUID v4
-            const sessionId = crypto.randomUUID();
-
-            // Salvataggio refresh token nel database per verifica validità
+            // Crea la nuova sessione
             await tx.userRefreshToken.create({
                 data: {
                     token: refreshToken,
                     userId: user.id,
                     sessionId,
-                    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 giorni
+                    expiresAt
                 }
             });
-
+            
+            authLogger.info(`Nuovo login per utente ${user.id} con sessionId ${sessionId}`);
+            
             return { accessToken, refreshToken, sessionId };
         });
-
-        // Preparazione risposta utente senza dati sensibili
-        const userResponse = {
-            id: user.id,
-            email: user.email,
-            role: user.role,
-        };
-
+        
+        // Rimuovi password dal risultato
+        const { password: _, ...userWithoutPassword } = user;
+        
         return {
-            user: userResponse,
-            accessToken: sessionData.accessToken,
-            refreshToken: sessionData.refreshToken,
-            sessionId: sessionData.sessionId
+            user: userWithoutPassword,
+            accessToken: result.accessToken,
+            refreshToken: result.refreshToken,
+            sessionId: result.sessionId
         };
     }
-
+    
     /**
-     * Effettua il logout revocando una sessione specifica.
+     * Revoca di una specifica sessione utente (logout).
      * 
-     * @description Implementa il flusso di logout:
-     * 1. Validazione dei parametri di input
-     * 2. Verifica autenticazione e autorizzazione
-     * 3. Revoca della sessione nel database
-     * 
-     * Implementa le seguenti misure di sicurezza:
-     * - Verifica esistenza e proprietà della sessione
-     * - Controllo sessioni già revocate
-     * - Verifica che l'utente possa revocare solo le proprie sessioni
-     * 
-     * @param sessionId - ID univoco della sessione da revocare
-     * @param req - Oggetto Request con dati utente autenticato
-     * @throws BadRequestException per sessionId non valido
-     * @throws ForbiddenException per utente non autorizzato
-     * @throws NotFoundException per sessione non trovata o già revocata
+     * @param sessionId - ID della sessione da revocare
+     * @throws BadRequestException se l'ID sessione non è valido
      */
-    static async logout(sessionId: string, req: Express.Request) {
-        // Validazione parametri di input
-        if (!sessionId) {
-            throw new BadRequestException("SessionId non valido", ErrorCode.INVALID_REQUEST);
-        }
-
-        // Verifica che l'utente sia autenticato
+    static async logout(req: Express.Request, sessionId: string) {
         if (!req.user?.id) {
-            throw new ForbiddenException("Accesso negato: utente non autenticato", ErrorCode.FORBIDDEN);
+            throw new BadRequestException("Utente non autenticato", ErrorCode.INVALID_REQUEST);
         }
 
-        // Revoca del refresh token nel database
-        // Importante: aggiorniamo SOLO se la sessione appartiene all'utente corrente
-        // per prevenire attacchi di sessione crossing
+        if (!sessionId) {
+            throw new BadRequestException("SessionId non valida", ErrorCode.INVALID_REQUEST);
+        }
+
         const { count } = await prismaClient.userRefreshToken.updateMany({
             where: {
+                userId: req.user.id,
                 sessionId,
-                userId: req.user.id,  // Garantisce che l'utente possa revocare solo le proprie sessioni
-                revoked: false         // Verifica che non sia già revocata
-            },
+                revoked: false
+            },  
             data: { revoked: true }
         });
 
-        // Se nessun record è stato aggiornato, la sessione non esiste
-        // o non appartiene all'utente corrente o è già revocata
         if (count === 0) {
-            throw new NotFoundException("Sessione non trovata o già revocata", ErrorCode.NOT_FOUND);
+            throw new NotFoundException("Sessione non trovata o già revocata");
+        }
+    }
+    
+    /**
+     * Aggiorna la data di ultimo accesso per l'utente.
+     * 
+     * @param req - Richiesta Express con informazioni utente
+     */
+    static async lastLogin(req: any) {
+        if (req.user && req.user.id) {
+            await prismaClient.user.update({
+                where: { id: req.user.id },
+                data: { lastLogin: new Date() }
+            });
+            
+            authLogger.info(`Aggiornato lastLogin per utente ${req.user.id}`);
         }
     }
 }

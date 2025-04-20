@@ -78,7 +78,7 @@ export const updatePassword = async (req: Request, res: Response) => {
   const { oldPassword, newPassword } = req.body;
   
   // Deleghiamo al service la verifica e l'aggiornamento della password
-  await PasswordService.updatePassword(req, oldPassword, newPassword);
+  await PasswordService.changePassword(req, oldPassword, newPassword);
 
   // Cancelliamo il cookie di refresh token
   res.clearCookie('refreshToken', {

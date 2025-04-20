@@ -25,5 +25,6 @@ export enum ErrorCode {
     REFRESH_TOKEN_REVOKED = 4004,   // Refresh token revocato
     FORBIDDEN = 4005,               // Autorizzazione negata
     INVALID_SESSION = 4006,         // Sessione non valida
-    INVALID_CSRF_TOKEN = 4007       // Token CSRF non valido
+    INVALID_CSRF_TOKEN = 4007,      // Token CSRF non valido
+    TOKEN_EXPIRED = 4008            // Access token scaduto
 }

@@ -14,13 +14,30 @@ import { User, Admin } from "@prisma/client";
 declare global {
     namespace Express {
       /**
+       * Estensione dell'interfaccia Request di Express.
+       * 
+       * Aggiunge:
+       * - admin: Oggetto con proprietà essenziali dell'admin autenticato
+       * - user: Oggetto con proprietà essenziali dell'utente autenticato
+       * 
        * Entrambe le proprietà utilizzano il type picking per selezionare
        * solo i campi necessari dal modello completo, seguendo il principio
        * del privilegio minimo.
        */
       interface Request {
+        /**
+         * Admin autenticato con proprietà essenziali.
+         * Disponibile solo quando la request è passata attraverso
+         * il middleware adminAuth.
+         */
         admin?: Pick<Admin, 'id' | 'email'>;
-        user?: Pick<User, 'id' | 'email' | 'role'>;
+        
+        /**
+         * Utente autenticato con proprietà essenziali.
+         * Disponibile solo quando la request è passata attraverso
+         * il middleware userAuth.
+         */
+        user?: Pick<User, 'id' | 'email' | 'role' | 'lastLogin'>;
       }
     }
   }

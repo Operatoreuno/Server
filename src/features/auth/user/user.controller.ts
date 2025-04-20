@@ -2,6 +2,8 @@ import { ErrorCode } from "src/core/errors/error.codes";
 import { UserService } from "./user.service";
 import { Request, Response } from "express";
 import { UnauthorizedException, BadRequestException } from "src/core/errors/exceptions/4xx";
+import { handleTokenRefresh } from "../utils/auth";
+import { userAuthConfig } from "./user.config";
 
 /**
  * Controller per la gestione dell'autenticazione utenti.
@@ -10,6 +12,7 @@ import { UnauthorizedException, BadRequestException } from "src/core/errors/exce
  * 1. Login con creazione token (userLogin)
  * 2. Verifica utente autenticato (userMe)
  * 3. Logout con revoca sessione (userLogout)
+ * 4. Refresh token (refreshToken)
  * 
  * Ogni controller delega la logica di business al UserService
  * e si occupa solo di gestire la richiesta HTTP e formattare la risposta.
@@ -36,7 +39,7 @@ import { UnauthorizedException, BadRequestException } from "src/core/errors/exce
 export const userLogin = async (req: Request, res: Response) => {
   // Estrazione credenziali dal body
   const { email, password } = req.body;
-  
+
   // Deleghiamo la logica di business al service
   const { user, accessToken, refreshToken, sessionId } = await UserService.login(email, password);
 
@@ -57,8 +60,8 @@ export const userLogin = async (req: Request, res: Response) => {
   });
 
   // Invia la risposta con token di accesso e CSRF token
-  res.json({ 
-    user, 
+  res.json({
+    user,
     token: accessToken,
     csrfToken: res.locals.csrfToken // Impostato dal middleware setupCsrf
   });
@@ -91,7 +94,7 @@ export const userLogout = async (req: Request, res: Response) => {
   }
 
   // Deleghiamo la logica di business al service
-  await UserService.logout(sessionId, req);
+  await UserService.logout(req, sessionId);
 
   // Rimuoviamo i cookie di autenticazione
   res.clearCookie('refreshToken', {
@@ -129,7 +132,30 @@ export const userMe = async (req: Request, res: Response) => {
   if (!req.user) {
     throw new UnauthorizedException("User non autenticato", ErrorCode.UNAUTHORIZED);
   }
-  
-  // Inviamo i dati dell'utente autenticato
+  // Deleghiamo l'aggiornamento al service
+  await UserService.lastLogin(req);
   res.json({ user: req.user });
 }
+
+/**
+ * Controller per il refresh esplicito del token.
+ * 
+ * @description Gestisce il rinnovo manuale dei token quando l'access token scade:
+ * - Utilizza la funzione handleTokenRefresh per generare nuovi token
+ * - Restituisce un nuovo access token in risposta
+ * 
+ * @param req - Oggetto Request Express
+ * @param res - Oggetto Response Express
+ */
+export const refreshToken = async (req: Request, res: Response) => {
+  // La funzione handleTokenRefresh si occupa di tutto il processo di rinnovo
+  const payload = await handleTokenRefresh(req, res, userAuthConfig);
+  
+  // Estraiamo il nuovo token dall'header Authorization appena aggiornato
+  const newToken = req.headers.authorization?.split(' ')[1];
+  
+  res.json({
+    success: true,
+    token: newToken
+  });
+};

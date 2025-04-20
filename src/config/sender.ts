@@ -25,8 +25,13 @@ import { MAILGUN_DOMAIN } from "@config/env";
  * massima compatibilità e accessibilità.
  */
 interface EmailTemplate {
+  /** Oggetto/titolo della email */
   subject: string;
+  
+  /** Corpo email in formato testo semplice (fallback) */
   text: string;
+  
+  /** Corpo email in formato HTML */
   html: string;
 }
 
@@ -44,12 +49,12 @@ interface EmailTemplate {
  * @throws Errore in caso di problemi di connessione o invio
  */
 export const sendEmail = async (email: string, template: EmailTemplate) => {
-
+  // Invio email tramite API Mailgun
   return mg.messages.create(MAILGUN_DOMAIN, {
-    from: emailFrom,        
-    to: email,              
+    from: emailFrom,        // Mittente standardizzato
+    to: email,              // Destinatario
     subject: template.subject,
-    text: template.text,    
-    html: template.html     
+    text: template.text,    // Versione plain text (fallback)
+    html: template.html     // Versione HTML (principale)
   });
 };

@@ -1,7 +1,7 @@
 import { errorHandler } from "@errors/error.handler";
 import { Router } from "express";
 import { listUsers, getUserById, updateUser, deleteUser } from "./manage.controller";
-import { adminAuth } from "@features/auth/middleware/auth";
+import { adminAuth } from "@features/auth/utils/auth";
 
 /**
  * Router per le funzionalità di gestione utenti.
@@ -19,10 +19,20 @@ import { adminAuth } from "@features/auth/middleware/auth";
  */
 const rootRouter:Router = Router();
 
-// Routes Admin Web
+// Recupero lista paginata di utenti
+// Accessibile solo agli amministratori
 rootRouter.use('/list-users', adminAuth, errorHandler(listUsers));
+
+// Recupero dettagli di un utente specifico tramite ID
+// Accessibile solo agli amministratori
 rootRouter.use('/get-user', adminAuth, errorHandler(getUserById));
+
+// Aggiornamento dati di un utente esistente
+// Accessibile solo agli amministratori
 rootRouter.use('/update-user', adminAuth, errorHandler(updateUser));
+
+// Eliminazione di un utente dal sistema
+// Accessibile solo agli amministratori
 rootRouter.use('/delete-user', adminAuth, errorHandler(deleteUser));
 
 export default {rootRouter};

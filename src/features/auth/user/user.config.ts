@@ -1,6 +1,6 @@
 import { USER_JWT_SECRET, USER_REFRESH_TOKEN_SECRET } from "@config/env";
 import { prismaClient } from "@app";
-import { AuthConfig } from "../types";
+import { AuthConfig } from "../utils/types";
 
 /**
  * Configurazione per l'autenticazione degli utenti standard.

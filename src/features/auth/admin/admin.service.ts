@@ -2,10 +2,11 @@ import * as jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { prismaClient } from "@app";
 import { compare } from "bcrypt";
-import { LoginSchema } from "@utils/schemas";
+import { LoginSchema } from "@core/utils/schemas";
 import { BadRequestException, ForbiddenException, NotFoundException } from "src/core/errors/exceptions/4xx";
 import { ErrorCode } from "src/core/errors/error.codes";
 import { ADMIN_JWT_SECRET, ADMIN_REFRESH_TOKEN_SECRET } from "@config/env";
+import { authLogger } from "@logger";
 
 /**
  * Servizio per la gestione dell'autenticazione degli amministratori.
@@ -28,85 +29,105 @@ export class AdminService {
    * @throws BadRequestException per credenziali errate o problemi di validazione
    */
   static async login(email: string, password: string) {
-    // Validazione input con schema Zod
-    LoginSchema.safeParse({ email, password });
-    const admin = await prismaClient.admin.findFirst({ where: { email } });
+    
+    const validatedData = LoginSchema.parse({ email, password });
+
+    const { email: sanitizedEmail, password: sanitizedPassword } = validatedData;
+
+    const admin = await prismaClient.admin.findUnique({
+      where: { email: sanitizedEmail },
+      select: {
+        id: true,
+        email: true,
+        password: true }
+    });
 
     // Verifica password con timing attack safe comparison
-    if (!admin || !compare(password, admin.password)) {
+    if (!admin || !(await compare(sanitizedPassword, admin.password))) {
       await new Promise(resolve => setTimeout(resolve, 200));
+      authLogger.info(`Tentativo di login fallito per l'email: ${sanitizedEmail}`);
       throw new BadRequestException("Email o password errati", ErrorCode.INVALID_REQUEST);
     }
 
     const MAX_ACTIVE_SESSIONS = 2;
-        
-        // Controlla le sessioni in una transazione
-        const sessionData = await prismaClient.$transaction(async (tx) => {
-            const activeSessions = await tx.adminRefreshToken.count({
-                where: { 
-                    adminId: admin.id, 
-                    revoked: false,
-                    expiresAt: { gt: new Date() } 
-                }
-            });
-        
-            // Se l'utente ha raggiunto il limite di sessioni
-            if (activeSessions >= MAX_ACTIVE_SESSIONS) {
-                // Troviamo la sessione più vecchia
-                const oldestSessions = await tx.adminRefreshToken.findMany({
-                    where: { 
-                        adminId: admin.id,
-                        revoked: false
-                    },
-                    orderBy: { createdAt: 'asc' },
-                    take: 1 
-                });
-            
-                if (oldestSessions.length > 0) {
-                    await tx.adminRefreshToken.update({
-                        where: { id: oldestSessions[0].id },
-                        data: { revoked: true }
-                    });
-                }
+    // Utilizziamo una transazione per garantire l'atomicità delle operazioni
+    const sessionId = crypto.randomUUID();
+    
+    // Creazione access e refresh token
+    const accessToken = jwt.sign(
+        { id: admin.id, email: admin.email }, 
+        ADMIN_JWT_SECRET, 
+        { expiresIn: '15m' }
+    );
+    
+    const refreshToken = jwt.sign(
+        { id: admin.id, sessionId }, 
+        ADMIN_REFRESH_TOKEN_SECRET, 
+        { expiresIn: '7d' }
+    );
+    
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7); // 7 giorni
+    
+    // Inizia transazione per gestire sessioni e token
+    const sessionData = await prismaClient.$transaction(async (tx) => {
+        const activeSessions = await tx.adminRefreshToken.count({
+            where: {
+                adminId: admin.id,
+                revoked: false
             }
-            
-            // Crea il payload con informazioni aggiuntive
-            const tokenPayload = { 
-                id: admin.id,
-                email: admin.email,
-                iat: Math.floor(Date.now() / 1000)
-            };
+        });
         
-            const accessToken = jwt.sign(tokenPayload, ADMIN_JWT_SECRET!, { expiresIn: '5m' });
-            const refreshToken = jwt.sign({ id: admin.id }, ADMIN_REFRESH_TOKEN_SECRET!, { expiresIn: '7d' });
-            const sessionId = crypto.randomUUID();
-        
-            // Crea il nuovo refresh token
-            await tx.adminRefreshToken.create({
-                data: {
-                    token: refreshToken,
+        // Se ci sono troppe sessioni attive, revoca la più vecchia
+        if (activeSessions >= MAX_ACTIVE_SESSIONS) {
+            const oldestSession = await tx.adminRefreshToken.findFirst({
+                where: {
                     adminId: admin.id,
-                    sessionId,
-                    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+                    revoked: false
+                },
+                orderBy: {
+                    createdAt: 'asc'
                 }
             });
-
-            return { accessToken, refreshToken, sessionId };
-        });
-
-        // Rimuovo password dal risultato
-        const adminResponse = {
-            id: admin.id,
-            email: admin.email,
-        };
+            
+            if (oldestSession) {
+                await tx.adminRefreshToken.update({
+                    where: { id: oldestSession.id },
+                    data: { revoked: true }
+                });
+                
+                authLogger.info(`Sessione più vecchia revocata per admin ${admin.id} (${oldestSession.sessionId})`);
+            }
+        }
         
-        return { 
-            admin: adminResponse, 
-            accessToken: sessionData.accessToken, 
-            refreshToken: sessionData.refreshToken, 
-            sessionId: sessionData.sessionId 
-        };
-    }
+        // Salva il nuovo refresh token
+        await tx.adminRefreshToken.create({
+            data: {
+                token: refreshToken,
+                adminId: admin.id,
+                sessionId,
+                expiresAt
+            }
+        });
+        
+        authLogger.info(`Nuovo login per admin ${admin.id} con sessionId ${sessionId}`);
+        
+        return { accessToken, refreshToken, sessionId };
+    });
+
+    // Rimuovo password dal risultato
+    const adminResponse = {
+        id: admin.id,
+        email: admin.email,
+    };
+    
+    return { 
+        admin: adminResponse, 
+        accessToken: sessionData.accessToken, 
+        refreshToken: sessionData.refreshToken, 
+        sessionId: sessionData.sessionId 
+    };
+  }
 
   /**
    * Revoca di una specifica sessione amministratore (logout).

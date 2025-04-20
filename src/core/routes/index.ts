@@ -23,8 +23,8 @@ const mobileRouter = Router();
 /**
  * Routes per autenticazione
  * 
- * Web: login, logout, me (utente) && login, logout, me (admin)
- * Mobile: login, logout, me (solo utente)
+ * Web: login, logout, me, lastLogin (utente) && login, logout, me (admin)
+ * Mobile: login, logout, me, lastLogin (solo utente)
  */
 apiRouter.use('/auth', authRoutes.rootRouter);
 mobileRouter.use('/auth', authRoutes.mobileRouter);
